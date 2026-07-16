@@ -62,6 +62,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # xai-yis-tools-api build.rs needs protoc. Repo bin/protoc is a dotslash
+      # wrapper and CI does not ship dotslash — install a real protoc binary.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          which protoc
+          protoc --version
+          # find_protoc prefers $PROTOC if set; ensure PATH protoc works either way
+          echo "PROTOC=${PROTOC:-}"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -70,8 +87,17 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        env:
+          # Prefer the CI-installed protoc over repo bin/protoc (dotslash).
+          PROTOC: ${{ env.PROTOC }}
         run: |
           set -euo pipefail
+          # arduino/setup-protoc puts protoc on PATH; pin absolute path for build scripts
+          if [[ -z "${PROTOC:-}" ]]; then
+            export PROTOC="$(command -v protoc)"
+          fi
+          echo "Using PROTOC=$PROTOC"
+          "$PROTOC" --version
           cargo build -p xai-yis-pager-bin --release --target "${{ matrix.target }}"
           SRC="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           test -f "$SRC"

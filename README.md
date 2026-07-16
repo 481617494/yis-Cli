@@ -57,6 +57,11 @@ yis --version
 > 上游 xAI 官方安装（连云端登录，与本本地版不同）：
 > `curl -fsSL https://x.ai/cli/install.sh | bash`
 
+## 本地开发与运维
+
+完整命令清单（编译、模型配置、发版、清理 `target/`）：  
+→ **[docs/本地开发与运维.md](docs/本地开发与运维.md)**
+
 ## Building from source
 
 Requirements:

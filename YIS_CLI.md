@@ -2,6 +2,8 @@
 
 本仓库基于上游 CLI 二次发行，产品名为 **Yis Cli**。
 
+> **本地开发 / 编译 / 发版 / 清理 target**：见 [docs/本地开发与运维.md](docs/本地开发与运维.md)
+
 ## 本地安全模式（发行默认）
 
 **Release 构建强制本地模式**：不向 `grok.com` / `auth.x.ai` / `cli-chat-proxy` / `x.ai` 发起授权、遥测、会话同步、trace 上传或自动更新。
