@@ -1,15 +1,16 @@
 # Build and publish Yis Cli binaries for macOS + Windows.
 #
 # Trigger:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.1.0 && git push yis v0.1.0
 #
-# Assets uploaded to GitHub Release:
+# Assets:
 #   yis-darwin-arm64
-#   yis-darwin-x64
+#   yis-darwin-x64   (cross-compiled on macos-14)
 #   yis-windows-x64.exe
-#   install.sh
-#   install.ps1
-#   checksums.txt
+#   install.sh / install.ps1 / checksums.txt
+#
+# Note: do NOT use macos-13 — runners are often stuck "queued" forever,
+# which blocks the release job and leaves the Releases page empty.
 
 name: Release
 
@@ -20,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to create/upload (e.g. v0.1.0). Leave empty to only build artifacts without a release."
+        description: "Optional tag name when manually running (e.g. v0.1.5). Leave empty to only build artifacts."
         required: false
         default: ""
 
@@ -32,61 +33,91 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-            asset: yis-darwin-arm64
-            bin: yis
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset: yis-darwin-x64
-            bin: yis
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset: yis-windows-x64.exe
-            bin: yis.exe
-
-    runs-on: ${{ matrix.os }}
+  build-mac:
+    runs-on: macos-14
     timeout-minutes: 180
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      # xai-yis-tools-api build.rs needs protoc. Repo bin/protoc is a dotslash
-      # wrapper and CI does not ship dotslash — install a real protoc binary.
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           version: "29.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pin absolute PROTOC so build scripts never pick up repo bin/protoc
-      # (Unix dotslash script; invalid on Windows — os error 193).
-      - name: Pin PROTOC for build scripts
+      - name: Pin PROTOC
         shell: bash
         run: |
           set -euo pipefail
           PROTOC_PATH="$(command -v protoc)"
-          test -n "$PROTOC_PATH"
-          # On Windows Git Bash, prefer a real .exe path if present
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            if [[ -f "${PROTOC_PATH}.exe" ]]; then
-              PROTOC_PATH="${PROTOC_PATH}.exe"
-            fi
-            # Normalize to Windows path for native build scripts when possible
-            if command -v cygpath >/dev/null 2>&1; then
-              PROTOC_PATH="$(cygpath -w "$PROTOC_PATH")"
-            fi
+          echo "PROTOC=${PROTOC_PATH}" >> "$GITHUB_ENV"
+          protoc --version
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-mac-v3
+          cache-on-failure: true
+
+      - name: Build macOS arm64 + x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROTOC="${PROTOC:?}"
+          mkdir -p dist
+
+          echo "==> arm64 (native)"
+          cargo build -p xai-yis-pager-bin --release --target aarch64-apple-darwin
+          strip target/aarch64-apple-darwin/release/yis || true
+          cp target/aarch64-apple-darwin/release/yis dist/yis-darwin-arm64
+
+          echo "==> x64 (cross from Apple Silicon runner)"
+          cargo build -p xai-yis-pager-bin --release --target x86_64-apple-darwin
+          strip target/x86_64-apple-darwin/release/yis || true
+          cp target/x86_64-apple-darwin/release/yis dist/yis-darwin-x64
+
+          ls -lh dist/
+
+      - name: Upload mac artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-binaries
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pin PROTOC
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROTOC_PATH="$(command -v protoc)"
+          if [[ -f "${PROTOC_PATH}.exe" ]]; then
+            PROTOC_PATH="${PROTOC_PATH}.exe"
+          fi
+          if command -v cygpath >/dev/null 2>&1; then
+            PROTOC_PATH="$(cygpath -w "$PROTOC_PATH")"
           fi
           echo "PROTOC=${PROTOC_PATH}" >> "$GITHUB_ENV"
           echo "Using PROTOC=${PROTOC_PATH}"
@@ -95,55 +126,52 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.target }}-v2
+          shared-key: release-win-v3
           cache-on-failure: true
 
-      - name: Build release binary
+      - name: Build Windows x64
         shell: bash
         run: |
           set -euo pipefail
-          echo "Using PROTOC=${PROTOC:?PROTOC must be set}"
-          # protoc --version may need the raw PATH name on some Windows setups
-          protoc --version || "$PROTOC" --version
-          cargo build -p xai-yis-pager-bin --release --target "${{ matrix.target }}"
-          SRC="target/${{ matrix.target }}/release/${{ matrix.bin }}"
-          test -f "$SRC"
-          # Strip on Unix to shrink size (Windows uses link-time strip / optional)
-          if [[ "${{ runner.os }}" != "Windows" ]]; then
-            strip "$SRC" || true
-          fi
+          export PROTOC="${PROTOC:?}"
+          protoc --version || true
+          cargo build -p xai-yis-pager-bin --release --target x86_64-pc-windows-msvc
           mkdir -p dist
-          cp "$SRC" "dist/${{ matrix.asset }}"
-          ls -lh "dist/${{ matrix.asset }}"
+          cp target/x86_64-pc-windows-msvc/release/yis.exe dist/yis-windows-x64.exe
+          ls -lh dist/
 
-      - name: Upload artifact
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          name: windows-binary
+          path: dist/yis-windows-x64.exe
           if-no-files-found: error
           retention-days: 14
 
-  # Publish even if some matrix builds failed (e.g. Windows red, Mac green).
-  # Previously `needs: build` skipped this job entirely when any OS failed →
-  # empty Releases page despite successful Mac artifacts.
   release:
-    needs: build
+    needs: [build-mac, build-windows]
     runs-on: ubuntu-latest
+    # Always attempt publish if this was a tag push, even when one OS failed.
     if: |
       always()
-      && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != '')
       && !cancelled()
+      && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != '')
     steps:
-      - name: Checkout (for install scripts)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download mac artifacts
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
+          name: mac-binaries
           path: artifacts
-          merge-multiple: true
+
+      - name: Download windows artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: windows-binary
+          path: artifacts
 
       - name: Assemble release assets
         id: assemble
@@ -151,38 +179,33 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          # Flatten whatever matrix jobs uploaded
           if [[ -d artifacts ]]; then
             find artifacts -type f -print0 | while IFS= read -r -d '' f; do
-              cp "$f" "release/$(basename "$f")"
+              cp -v "$f" "release/$(basename "$f")"
             done
           fi
-          # Always ship installers (curl | bash works once any binary is present)
           cp scripts/install-yis.sh release/install.sh
           cp scripts/install-yis.ps1 release/install.ps1
-          chmod +x release/install.sh || true
+          chmod +x release/install.sh
+
+          echo "=== release dir ==="
+          ls -lah release/ || true
 
           BIN_COUNT=0
+          shopt -s nullglob
           for f in release/yis-*; do
-            [[ -f "$f" ]] || continue
             BIN_COUNT=$((BIN_COUNT + 1))
           done
           echo "binary_count=${BIN_COUNT}" >> "$GITHUB_OUTPUT"
           if [[ "$BIN_COUNT" -eq 0 ]]; then
-            echo "::error::No platform binaries were built; cannot create a useful Release"
-            ls -la artifacts release || true
+            echo "::error::No binaries found — all build jobs failed?"
             exit 1
           fi
 
           (
             cd release
-            if command -v shasum >/dev/null 2>&1; then
-              shasum -a 256 * > checksums.txt
-            else
-              sha256sum * > checksums.txt
-            fi
+            sha256sum * > checksums.txt || shasum -a 256 * > checksums.txt
           )
-          echo "Release assets:"
           ls -lh release/
 
       - name: Resolve tag
@@ -194,6 +217,7 @@ jobs:
           else
             echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
+          echo "Publishing tag: $(cat "$GITHUB_OUTPUT")"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -201,14 +225,14 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Yis Cli ${{ steps.tag.outputs.name }}
           draft: false
-          prerelease: ${{ contains(steps.tag.outputs.name, 'alpha') || contains(steps.tag.outputs.name, 'beta') || contains(steps.tag.outputs.name, 'rc') }}
+          make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: release/*
           body: |
             ## Yis Cli ${{ steps.tag.outputs.name }}
 
-            本地安全模式 CLI：不连 grok.com 登录，使用自备 API Key。
+            本地安全模式：不登录 grok.com，使用自备 API Key。
 
             ### 安装
 
@@ -227,13 +251,5 @@ jobs:
             yis models setup
             yis
             ```
-
-            ### 资源（以实际 Assets 为准；部分平台失败时可能缺失）
-            | 文件 | 平台 |
-            |------|------|
-            | `yis-darwin-arm64` | Apple Silicon |
-            | `yis-darwin-x64` | Intel Mac |
-            | `yis-windows-x64.exe` | Windows 64-bit |
-            | `install.sh` / `install.ps1` | 安装脚本 |
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
