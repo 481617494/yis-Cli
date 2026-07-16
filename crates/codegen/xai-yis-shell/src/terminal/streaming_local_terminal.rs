@@ -929,7 +929,9 @@ fn spawn_with_argv(
     #[cfg(not(unix))]
     {
         use process_wrap::tokio::{CommandWrap, CreationFlags, JobObject, KillOnDrop};
-        use windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        use windows::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_CREATION_FLAGS,
+        };
 
         let mut cmd = CommandWrap::with_new(program, |cmd| {
             set_argv(cmd);
@@ -941,7 +943,10 @@ fn spawn_with_argv(
                 .stderr(Stdio::piped());
         });
         // CreationFlags must precede JobObject per process-wrap docs.
-        cmd.wrap(CreationFlags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW));
+        // Build PROCESS_CREATION_FLAGS from .0 bits so we stay compatible if
+        // BitOr impls differ slightly across windows crate minor versions.
+        let flags = PROCESS_CREATION_FLAGS(CREATE_NEW_PROCESS_GROUP.0 | CREATE_NO_WINDOW.0);
+        cmd.wrap(CreationFlags(flags));
         // JobObject + KillOnDrop: dropping terminates every descendant.
         cmd.wrap(JobObject);
         cmd.wrap(KillOnDrop);
