@@ -70,34 +70,41 @@ jobs:
           version: "29.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify protoc
+      # Pin absolute PROTOC so build scripts never pick up repo bin/protoc
+      # (Unix dotslash script; invalid on Windows — os error 193).
+      - name: Pin PROTOC for build scripts
         shell: bash
         run: |
           set -euo pipefail
-          which protoc
+          PROTOC_PATH="$(command -v protoc)"
+          test -n "$PROTOC_PATH"
+          # On Windows Git Bash, prefer a real .exe path if present
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            if [[ -f "${PROTOC_PATH}.exe" ]]; then
+              PROTOC_PATH="${PROTOC_PATH}.exe"
+            fi
+            # Normalize to Windows path for native build scripts when possible
+            if command -v cygpath >/dev/null 2>&1; then
+              PROTOC_PATH="$(cygpath -w "$PROTOC_PATH")"
+            fi
+          fi
+          echo "PROTOC=${PROTOC_PATH}" >> "$GITHUB_ENV"
+          echo "Using PROTOC=${PROTOC_PATH}"
           protoc --version
-          # find_protoc prefers $PROTOC if set; ensure PATH protoc works either way
-          echo "PROTOC=${PROTOC:-}"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}-v2
           cache-on-failure: true
 
       - name: Build release binary
         shell: bash
-        env:
-          # Prefer the CI-installed protoc over repo bin/protoc (dotslash).
-          PROTOC: ${{ env.PROTOC }}
         run: |
           set -euo pipefail
-          # arduino/setup-protoc puts protoc on PATH; pin absolute path for build scripts
-          if [[ -z "${PROTOC:-}" ]]; then
-            export PROTOC="$(command -v protoc)"
-          fi
-          echo "Using PROTOC=$PROTOC"
-          "$PROTOC" --version
+          echo "Using PROTOC=${PROTOC:?PROTOC must be set}"
+          # protoc --version may need the raw PATH name on some Windows setups
+          protoc --version || "$PROTOC" --version
           cargo build -p xai-yis-pager-bin --release --target "${{ matrix.target }}"
           SRC="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           test -f "$SRC"

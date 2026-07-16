@@ -115,9 +115,26 @@ impl XaiProtoBuilder {
         // Can only process one input file when using --dependency_out=FILE.
         for proto in protos {
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
-            command
-                .arg("--dependency_out=/dev/stdout")
-                .arg("--descriptor_set_out=/dev/null");
+
+            // Unix can stream deps via /dev/stdout; Windows has no /dev/* —
+            // write to temp files instead (and use NUL for discarded output).
+            #[cfg(unix)]
+            {
+                command
+                    .arg("--dependency_out=/dev/stdout")
+                    .arg("--descriptor_set_out=/dev/null");
+            }
+            #[cfg(windows)]
+            let (dep_path, desc_path) = {
+                let tmp = std::env::temp_dir();
+                let id = std::process::id();
+                let dep = tmp.join(format!("yis-protoc-deps-{id}.d"));
+                let desc = tmp.join(format!("yis-protoc-desc-{id}.pb"));
+                command
+                    .arg(format!("--dependency_out={}", dep.display()))
+                    .arg(format!("--descriptor_set_out={}", desc.display()));
+                (dep, desc)
+            };
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -143,30 +160,55 @@ impl XaiProtoBuilder {
                 return Err(anyhow::anyhow!("protoc command failed"));
             }
 
-            let output =
+            #[cfg(unix)]
+            let dep_text =
                 String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+            #[cfg(windows)]
+            let dep_text = {
+                let text = fs::read_to_string(&dep_path).with_context(|| {
+                    format!("read protoc dependency file {}", dep_path.display())
+                })?;
+                let _ = fs::remove_file(&dep_path);
+                let _ = fs::remove_file(&desc_path);
+                text
+            };
 
-            let mut lines = output.lines();
-            let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
-            })?;
-            for line in iter::once(rem).chain(lines) {
-                let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
-                // Depending on absolute paths like
-                // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
-                // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
+            // Makefile-style dependency file. First line is "target: dep…" —
+            // do not split on the first ':' alone (Windows paths are `C:\…`).
+            for (i, line) in dep_text.lines().enumerate() {
+                let mut line = line.trim();
+                if line.is_empty() {
                     continue;
                 }
-
-                if !fs::exists(line)? {
-                    return Err(anyhow::anyhow!("dependency file not found: {line}"));
+                line = line.strip_suffix('\\').unwrap_or(line).trim();
+                if i == 0 {
+                    // Prefer ": " (target + space-separated deps). Fallback: last ':' before deps.
+                    if let Some(rest) = line.split_once(": ").map(|(_, r)| r) {
+                        line = rest.trim();
+                    } else if let Some(rest) = line.rsplit_once(':').map(|(_, r)| r) {
+                        line = rest.trim();
+                    }
                 }
-
-                println!("cargo:rerun-if-changed={line}");
+                if line.is_empty() {
+                    continue;
+                }
+                // One line may list multiple deps separated by spaces.
+                for dep in line.split_whitespace() {
+                    let dep = dep.trim();
+                    if dep.is_empty() {
+                        continue;
+                    }
+                    // Skip well-known type includes for deterministic cargo keys.
+                    if dep.contains("/include/google/protobuf/")
+                        || dep.contains("\\include\\google\\protobuf\\")
+                    {
+                        continue;
+                    }
+                    if !fs::exists(dep)? {
+                        return Err(anyhow::anyhow!("dependency file not found: {dep}"));
+                    }
+                    println!("cargo:rerun-if-changed={dep}");
+                }
             }
         }
 

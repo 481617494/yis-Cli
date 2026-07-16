@@ -49,32 +49,36 @@ pub fn find_protoc() -> anyhow::Result<Option<PathBuf>> {
     }
 
     // 2. Walk up directories looking for bin/protoc (dotslash wrapper).
-    let cwd = env::current_dir()?;
-    let mut dir = cwd.clone();
-    let mut dir_rel = PathBuf::new();
-    loop {
-        // Return relative path to make build more deterministic.
-        let protoc = dir_rel.join("bin/protoc");
-        if protoc.try_exists()? {
-            match check_protoc_good(&protoc) {
-                Ok(()) => return Ok(Some(protoc)),
-                Err(e) => {
-                    // bin/protoc exists but can't execute — likely the dotslash wrapper
-                    // in an environment without dotslash (e.g. Bazel remote execution).
-                    // Fall through to PATH-based lookup below.
-                    eprintln!(
-                        "bin/protoc found at `{}` but failed to execute: {e:#}; \
-                         trying protoc from PATH as fallback",
-                        protoc.display()
-                    );
-                    break;
+    //    Skip on Windows: repo bin/protoc is a Unix dotslash script (not a .exe).
+    #[cfg(not(windows))]
+    {
+        let cwd = env::current_dir()?;
+        let mut dir = cwd.clone();
+        let mut dir_rel = PathBuf::new();
+        loop {
+            // Return relative path to make build more deterministic.
+            let protoc = dir_rel.join("bin/protoc");
+            if protoc.try_exists()? {
+                match check_protoc_good(&protoc) {
+                    Ok(()) => return Ok(Some(protoc)),
+                    Err(e) => {
+                        // bin/protoc exists but can't execute — likely the dotslash wrapper
+                        // in an environment without dotslash (e.g. Bazel remote execution).
+                        // Fall through to PATH-based lookup below.
+                        eprintln!(
+                            "bin/protoc found at `{}` but failed to execute: {e:#}; \
+                             trying protoc from PATH as fallback",
+                            protoc.display()
+                        );
+                        break;
+                    }
                 }
             }
+            if !dir.pop() {
+                break;
+            }
+            dir_rel.push("..");
         }
-        if !dir.pop() {
-            break;
-        }
-        dir_rel.push("..");
     }
 
     // 3. Try protoc from PATH (system install or other tooling).
