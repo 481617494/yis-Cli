@@ -3,7 +3,7 @@ pub mod find_protoc;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, iter};
+use std::fs;
 
 /// Find the protoc well-known types include directory.
 ///
