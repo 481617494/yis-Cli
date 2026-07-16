@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "description": "Qoder Switch 内置厂商预设（与 cc-switch 类似）。添加时只需填 apiKey，其余字段可改。",
+  "presets": [
+    {
+      "id": "qoder-official",
+      "name": "Qoder 官方 Credits",
+      "type": "official",
+      "category": "official",
+      "model": "auto",
+      "notes": "使用 Qoder 账号 Credits，不消耗第三方 API Key。model 可选: auto/ultimate/performance/efficient/lite 或 Qwen3.7-Max 等"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "type": "byok",
+      "category": "cn_official",
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "format": "openai",
+      "website": "https://platform.deepseek.com",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-pro-pg",
+        "deepseek-v4-flash-pg"
+      ]
+    },
+    {
+      "id": "bailian",
+      "name": "阿里云百炼",
+      "type": "byok",
+      "category": "cn_official",
+      "provider": "bailian",
+      "model": "qwen3.5-plus-cp",
+      "format": "openai",
+      "website": "https://bailian.console.aliyun.com",
+      "models": [
+        "qwen3.5-plus-cp",
+        "qwen3-coder-plus",
+        "qwen-max",
+        "qwen-plus"
+      ]
+    },
+    {
+      "id": "zhipu",
+      "name": "智谱 GLM",
+      "type": "byok",
+      "category": "cn_official",
+      "provider": "zhipu",
+      "model": "glm-4.6",
+      "format": "openai",
+      "website": "https://open.bigmodel.cn",
+      "models": [
+        "glm-4.6",
+        "glm-4.5",
+        "glm-5.2",
+        "glm-4-flash"
+      ]
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi (Moonshot)",
+      "type": "byok",
+      "category": "cn_official",
+      "provider": "moonshot",
+      "model": "kimi-k2.5",
+      "format": "openai",
+      "website": "https://platform.moonshot.cn",
+      "models": [
+        "kimi-k2.5",
+        "kimi-k2.7-code",
+        "moonshot-v1-128k",
+        "moonshot-v1-32k"
+      ]
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "type": "byok",
+      "category": "cn_official",
+      "provider": "minimax",
+      "model": "MiniMax-M2.5",
+      "format": "openai",
+      "website": "https://platform.minimaxi.com",
+      "models": [
+        "MiniMax-M2.5",
+        "MiniMax-M3",
+        "MiniMax-Text-01"
+      ]
+    },
+    {
+      "id": "mimo",
+      "name": "小米 MIMO",
+      "type": "byok",
+      "category": "cn_official",
+      "provider": "mimo",
+      "model": "mimo-v2-pro",
+      "format": "openai",
+      "website": "https://platform.xiaomimimo.com",
+      "models": [
+        "mimo-v2-pro",
+        "mimo-v2-flash"
+      ]
+    },
+    {
+      "id": "openai-compatible",
+      "name": "OpenAI 兼容中转",
+      "type": "byok",
+      "category": "relay",
+      "provider": "openai",
+      "model": "gpt-4o",
+      "format": "openai",
+      "baseURL": "https://api.openai.com/v1",
+      "website": "",
+      "notes": "任意 OpenAI 兼容网关：改 baseURL + model + apiKey"
+    },
+    {
+      "id": "anthropic-compatible",
+      "name": "Anthropic 兼容中转",
+      "type": "byok",
+      "category": "relay",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "format": "anthropic",
+      "baseURL": "https://api.anthropic.com",
+      "website": "",
+      "notes": "任意 Anthropic 兼容网关：改 baseURL + model + apiKey"
+    }
+  ]
+}

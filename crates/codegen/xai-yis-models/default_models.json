@@ -1,0 +1,18 @@
+{
+  "default": "yis-build",
+  "web_search": "grok-4.20-multi-agent",
+  "image_description": "yis-build",
+  "session_summary": "yis-build",
+  "models": [
+    {
+      "model": "yis-build",
+      "name": "Yis Cli",
+      "description": "适合复杂编程任务",
+      "context_window": 500000,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "api_backend": "responses",
+      "supported_in_api": false
+    }
+  ]
+}

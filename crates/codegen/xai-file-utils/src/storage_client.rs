@@ -27,7 +27,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
 use xai_circuit_breaker::{BreakerConfig, BreakerOpen, CircuitBreaker, Outcome};
-use xai_grok_auth::AuthCredentialProvider;
+use xai_yis_auth::AuthCredentialProvider;
 
 use crate::circuit_breaker_observer::TracingObserver;
 
@@ -50,8 +50,8 @@ fn storage_breaker_config() -> BreakerConfig {
 /// Hook invoked by [`StorageClient`] at every 401 response site so that
 /// the embedding application can record auth-attribution telemetry.
 ///
-/// Mirrors the pattern in `xai-grok-sampler::Auth401AttributionCallback`
-/// and `xai-grok-tools::Auth401AttributionCallback`. The shell installs
+/// Mirrors the pattern in `xai-yis-sampler::Auth401AttributionCallback`
+/// and `xai-yis-tools::Auth401AttributionCallback`. The shell installs
 /// a bridge implementation that wires into
 /// `crate::auth::attribution::record_consumer_401`.
 ///
@@ -347,16 +347,16 @@ fn is_retryable_status(status: u16) -> bool {
 /// is available (bins, tests, bare `TraceExportConfig` with no auth wrap).
 ///
 /// SAFETY: only hit by bins/tests/no-AuthManager paths; the refresh-aware
-/// path uses the obfuscated shell impl (`GrokAuthCredentials::apply` via
+/// path uses the obfuscated shell impl (`YisAuthCredentials::apply` via
 /// `ShellAuthCredentialProvider`). A future reader should not innocently
 /// make the static provider the production default -- the obfuscated
 /// routing + obfstr-protected literals only live in the shell impl.
-pub struct StaticGrokAuth {
+pub struct StaticYisAuth {
     pub user_token: Option<String>,
     pub deployment_key: Option<String>,
 }
 
-impl StaticGrokAuth {
+impl StaticYisAuth {
     pub fn new(user_token: Option<String>) -> Self {
         Self {
             user_token,
@@ -374,14 +374,14 @@ impl StaticGrokAuth {
     }
 }
 
-impl xai_grok_auth::HttpAuth for StaticGrokAuth {
+impl xai_yis_auth::HttpAuth for StaticYisAuth {
     fn apply(&self, builder: reqwest::RequestBuilder, _base_url: &str) -> reqwest::RequestBuilder {
         if let Some(ref key) = self.deployment_key {
             builder.header("Authorization", format!("Bearer {}", key))
         } else if let Some(ref token) = self.user_token {
             builder
                 .header("Authorization", format!("Bearer {}", token))
-                .header("X-XAI-Token-Auth", "xai-grok-cli")
+                .header("X-XAI-Token-Auth", "xai-yis-cli")
         } else {
             builder
         }
@@ -390,17 +390,17 @@ impl xai_grok_auth::HttpAuth for StaticGrokAuth {
 
 #[cfg(test)]
 mod static_grok_auth_tests {
-    use super::StaticGrokAuth;
+    use super::StaticYisAuth;
 
     /// Deployment key must win over the user token (incl. the empty one the
     /// deployment-key path supplies); falls back to the user token otherwise.
     #[test]
     fn wire_bearer_prefers_deployment_key_then_falls_back_to_user_token() {
-        let mut deployment = StaticGrokAuth::new(Some(String::new()));
+        let mut deployment = StaticYisAuth::new(Some(String::new()));
         deployment.deployment_key = Some("deploy-key".to_string());
         assert_eq!(deployment.wire_bearer().as_deref(), Some("deploy-key"));
 
-        let oauth = StaticGrokAuth::new(Some("oauth-token".to_string()));
+        let oauth = StaticYisAuth::new(Some("oauth-token".to_string()));
         assert_eq!(oauth.wire_bearer().as_deref(), Some("oauth-token"));
     }
 }
@@ -456,9 +456,9 @@ impl StorageClient {
     /// * `proxy_base_url` - Base URL for the proxy (e.g., "https://cli-chat-proxy.grok.com/v1")
     /// * `user_token` - User's grok.com auth token
     pub fn new(proxy_base_url: &str, user_token: &str) -> Self {
-        let creds = StaticGrokAuth::new(Some(user_token.to_owned()));
+        let creds = StaticYisAuth::new(Some(user_token.to_owned()));
         let bearer = creds.wire_bearer();
-        let provider = Arc::new(xai_grok_auth::StaticAuthCredentialProvider::new(
+        let provider = Arc::new(xai_yis_auth::StaticAuthCredentialProvider::new(
             Box::new(creds),
             bearer,
         ));
@@ -544,17 +544,17 @@ impl StorageClient {
     /// storage requests (including the high-traffic `batch_upload`).
     ///
     /// These become the headers:
-    ///   - `x-grok-client-version`
-    ///   - `x-grok-client-identifier` (one of "grok-shell", "grok-pager",
+    ///   - `x-yis-client-version`
+    ///   - `x-yis-client-identifier` (one of "yis-shell", "yis-pager",
     ///     "grok-desktop", "grok-extension")
     ///
     /// Server-side logs in `cli-chat-proxy` and analytics queries now
     /// surface these values, making it easy to attribute 400/403 errors to
     /// specific client versions and products.
     ///
-    /// Preferred way to construct the client from the Grok shell/pager:
+    /// Preferred way to construct the client from the Yis Cli shell/pager:
     ///   `build_storage_client_for_proxy(..., client_identifier)`
-    /// (see `xai-grok-shell/src/auth/credential_provider.rs`).
+    /// (see `xai-yis-shell/src/auth/credential_provider.rs`).
     ///
     /// Direct callers (tests, load-test binaries, etc.) can use:
     ///   `StorageClient::with_provider(...).with_client_identity(version, identifier)`
@@ -568,7 +568,7 @@ impl StorageClient {
         self
     }
 
-    /// Sets the `x-grok-client-mode` value forwarded to cli-chat-proxy
+    /// Sets the `x-yis-client-mode` value forwarded to cli-chat-proxy
     /// (`headless` / `interactive`), for the `client_mode` metric label.
     pub fn with_client_mode(mut self, mode: impl Into<String>) -> Self {
         self.client_mode = Some(mode.into());
@@ -1097,20 +1097,20 @@ impl StorageClient {
     ) -> reqwest_middleware::RequestBuilder {
         // Prefer caller-provided identity (from shell/pager/etc.) so that
         // cli-chat-proxy logs and metrics see the real end-user client
-        // (e.g. "0.1.210-alpha.5", "grok-shell" / "grok-pager").
+        // (e.g. "0.1.210-alpha.5", "yis-shell" / "yis-pager").
         // Falls back to the library's own version for bins/tests.
         let version = self
             .client_version
             .as_deref()
-            .unwrap_or(xai_grok_version::VERSION);
-        let mut builder = builder.header("x-grok-client-version", version);
+            .unwrap_or(xai_yis_version::VERSION);
+        let mut builder = builder.header("x-yis-client-version", version);
 
         if let Some(id) = &self.client_identifier {
-            builder = builder.header("x-grok-client-identifier", id);
+            builder = builder.header("x-yis-client-identifier", id);
         }
 
         if let Some(mode) = &self.client_mode {
-            builder = builder.header("x-grok-client-mode", mode);
+            builder = builder.header("x-yis-client-mode", mode);
         }
 
         for (name, value) in crate::trace_context::trace_context_headers().iter() {
@@ -1978,7 +1978,7 @@ async fn upload_part_streaming(
         let mut request = client
             .post(&url)
             .header("Content-Type", "application/octet-stream")
-            .header("x-grok-client-version", xai_grok_version::VERSION)
+            .header("x-yis-client-version", xai_yis_version::VERSION)
             .header("Content-Length", length.to_string());
         for (name, value) in crate::trace_context::trace_context_headers().iter() {
             request = request.header(name.clone(), value.clone());

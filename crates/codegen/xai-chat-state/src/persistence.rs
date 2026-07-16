@@ -6,7 +6,7 @@
 //! in the actor / message-passing paradigm.
 
 use tokio::sync::mpsc;
-use xai_grok_sampling_types::ConversationItem;
+use xai_yis_sampling_types::ConversationItem;
 
 /// Abstraction over chat-specific persistence operations.
 ///

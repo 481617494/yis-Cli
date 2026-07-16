@@ -1,0 +1,181 @@
+# Build and publish Yis Cli binaries for macOS + Windows.
+#
+# Trigger:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Assets uploaded to GitHub Release:
+#   yis-darwin-arm64
+#   yis-darwin-x64
+#   yis-windows-x64.exe
+#   install.sh
+#   install.ps1
+#   checksums.txt
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/upload (e.g. v0.1.0). Leave empty to only build artifacts without a release."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: yis-darwin-arm64
+            bin: yis
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: yis-darwin-x64
+            bin: yis
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: yis-windows-x64.exe
+            bin: yis.exe
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p xai-yis-pager-bin --release --target "${{ matrix.target }}"
+          SRC="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          test -f "$SRC"
+          # Strip on Unix to shrink size (Windows uses link-time strip / optional)
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            strip "$SRC" || true
+          fi
+          mkdir -p dist
+          cp "$SRC" "dist/${{ matrix.asset }}"
+          ls -lh "dist/${{ matrix.asset }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
+    steps:
+      - name: Checkout (for install scripts)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # Flatten artifact dirs → release/
+          find artifacts -type f -print0 | while IFS= read -r -d '' f; do
+            cp "$f" "release/$(basename "$f")"
+          done
+          # Install scripts (canonical names for curl | bash)
+          cp scripts/install-yis.sh release/install.sh
+          cp scripts/install-yis.ps1 release/install.ps1
+          chmod +x release/install.sh || true
+          # Checksums
+          (
+            cd release
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 * > checksums.txt
+            else
+              sha256sum * > checksums.txt
+            fi
+          )
+          ls -lh release/
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Yis Cli ${{ steps.tag.outputs.name }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.name, 'alpha') || contains(steps.tag.outputs.name, 'beta') || contains(steps.tag.outputs.name, 'rc') }}
+          generate_release_notes: true
+          files: |
+            release/*
+          body: |
+            ## Yis Cli ${{ steps.tag.outputs.name }}
+
+            本地安全模式 CLI：不连 grok.com 登录，使用自备 API Key。
+
+            ### 安装
+
+            **macOS**
+            ```bash
+            curl -fsSL https://github.com/481617494/yis-Cli/releases/latest/download/install.sh | bash
+            ```
+
+            **Windows (PowerShell)**
+            ```powershell
+            irm https://github.com/481617494/yis-Cli/releases/latest/download/install.ps1 | iex
+            ```
+
+            ### 首次使用
+            ```bash
+            yis models setup
+            yis
+            ```
+
+            ### 资源
+            | 文件 | 平台 |
+            |------|------|
+            | `yis-darwin-arm64` | Apple Silicon |
+            | `yis-darwin-x64` | Intel Mac |
+            | `yis-windows-x64.exe` | Windows 64-bit |
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

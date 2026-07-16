@@ -1,0 +1,1066 @@
+#!/usr/bin/env python3
+"""
+终端交互式多 CLI 模型切换
+
+流程:
+  1. 左右键选择 CLI，回车确认
+  2. 上下键浏览自定义模型；最底「+ 新增模型」
+  3. Enter 选用；e 编辑；d 删除
+  4. 新增/编辑：名称、API Key，模型优先自动拉取列表选择
+
+键位:
+  ← →   选 CLI / 选厂商
+  ↑ ↓   列表移动
+  Enter 确认
+  e     编辑当前模型
+  d     删除
+  Esc/q 返回/退出
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import select
+import shutil
+import sys
+import termios
+import time
+import tty
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import Any
+# ---------------------------------------------------------------------------
+# 路径
+# ---------------------------------------------------------------------------
+
+APP_HOME = Path.home() / ".qoder-switch"
+STORE_FILE = APP_HOME / "store.json"
+BACKUPS_DIR = APP_HOME / "backups"
+
+QODER_HOME = Path(os.environ.get("QODER_CONFIG_DIR", Path.home() / ".qoder"))
+QODER_SETTINGS = QODER_HOME / "settings.json"
+QODER_MODEL_DEFAULT = QODER_HOME / ".models" / "default"
+
+CLIS: list[dict[str, str]] = [
+    {"id": "qoder", "label": "Qoder CLI"},
+    {"id": "claude", "label": "Claude Code"},
+    {"id": "codex", "label": "Codex CLI"},
+]
+
+VENDOR_PRESETS: list[dict[str, Any]] = [
+    {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "label": "DeepSeek",
+        "baseURL": "https://api.deepseek.com",
+        "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"],
+    },
+    {
+        "provider": "bailian",
+        "model": "qwen3.5-plus-cp",
+        "label": "阿里云百炼",
+        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "models": ["qwen3.5-plus-cp", "qwen3-coder-plus", "qwen-max", "qwen-plus", "qwen-turbo"],
+    },
+    {
+        "provider": "zhipu",
+        "model": "glm-4.6",
+        "label": "智谱 GLM",
+        "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+        "models": ["glm-4.6", "glm-4.5", "glm-5.2", "glm-4-flash", "glm-4-plus"],
+    },
+    {
+        "provider": "moonshot",
+        "model": "kimi-k2.5",
+        "label": "Kimi",
+        "baseURL": "https://api.moonshot.cn/v1",
+        "models": ["kimi-k2.5", "kimi-k2.7-code", "moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"],
+    },
+    {
+        "provider": "minimax",
+        "model": "MiniMax-M2.5",
+        "label": "MiniMax",
+        "baseURL": "https://api.minimaxi.com/v1",
+        "models": ["MiniMax-M2.5", "MiniMax-M3", "MiniMax-Text-01"],
+    },
+    {
+        "provider": "mimo",
+        "model": "mimo-v2-pro",
+        "label": "小米 MIMO",
+        "baseURL": "https://api.xiaomimimo.com/v1",
+        "models": ["mimo-v2-pro", "mimo-v2-flash"],
+    },
+    {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "label": "OpenAI兼容",
+        "baseURL": "https://api.openai.com/v1",
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3", "o4-mini"],
+    },
+    {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "label": "Anthropic兼容",
+        "baseURL": "https://api.anthropic.com",
+        "models": ["claude-sonnet-4-5", "claude-opus-4", "claude-haiku-4-5"],
+    },
+    {
+        "provider": "custom",
+        "model": "custom-model",
+        "label": "自定义",
+        "baseURL": "",
+        "models": [],
+    },
+]
+
+# provider -> 默认 API base（用于拉模型列表）
+DEFAULT_BASE_URLS: dict[str, str] = {
+    p["provider"]: str(p.get("baseURL") or "") for p in VENDOR_PRESETS if p.get("baseURL")
+}
+
+FALLBACK_MODELS: dict[str, list[str]] = {
+    p["provider"]: list(p.get("models") or []) for p in VENDOR_PRESETS
+}
+
+# ANSI（尽量少用）
+R = "\033[0m"
+B = "\033[1m"
+D = "\033[2m"
+REV = "\033[7m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+GRAY = "\033[90m"
+
+
+# ---------------------------------------------------------------------------
+# 终端
+# ---------------------------------------------------------------------------
+
+class Term:
+    def __init__(self) -> None:
+        self.fd = sys.stdin.fileno()
+        self.old: list[Any] | None = None
+
+    def __enter__(self) -> "Term":
+        self.old = termios.tcgetattr(self.fd)
+        tty.setraw(self.fd)
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self.old is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def raw(self) -> None:
+        tty.setraw(self.fd)
+
+    def cooked(self) -> None:
+        if self.old is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def read_key(self) -> str:
+        ch = os.read(self.fd, 1)
+        if ch == b"\x1b":
+            rest = b""
+            if select.select([self.fd], [], [], 0.05)[0]:
+                rest += os.read(self.fd, 1)
+            if rest.startswith(b"[") and select.select([self.fd], [], [], 0.05)[0]:
+                rest += os.read(self.fd, 1)
+            seq = ch + rest
+            return {
+                b"\x1b[A": "up",
+                b"\x1b[B": "down",
+                b"\x1b[C": "right",
+                b"\x1b[D": "left",
+            }.get(seq, "esc")
+        if ch in (b"\r", b"\n"):
+            return "enter"
+        if ch == b"\x03":
+            return "ctrl-c"
+        if ch == b"q":
+            return "q"
+        if ch == b"d":
+            return "d"
+        if ch == b"e":
+            return "e"
+        if ch == b"m":
+            return "m"
+        if ch == b"r":
+            return "r"
+        try:
+            return ch.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+
+def clear() -> None:
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def hide_cursor() -> None:
+    sys.stdout.write("\033[?25l")
+    sys.stdout.flush()
+
+
+def show_cursor() -> None:
+    sys.stdout.write("\033[?25h")
+    sys.stdout.flush()
+
+
+def put(s: str = "") -> None:
+    # raw 模式下 \n 只下移不回列首，必须用 \r\n，否则界面会呈楼梯状
+    sys.stdout.write(s + "\r\n")
+    sys.stdout.flush()
+
+
+def put_raw(s: str) -> None:
+    sys.stdout.write(s)
+    sys.stdout.flush()
+
+
+def pad(s: str, width: int) -> str:
+    """左对齐补空格（按字符数，够用即可）。"""
+    n = len(s)
+    if n >= width:
+        return s[:width]
+    return s + " " * (width - n)
+
+
+# ---------------------------------------------------------------------------
+# 存储
+# ---------------------------------------------------------------------------
+
+def ensure_store() -> dict[str, Any]:
+    APP_HOME.mkdir(parents=True, exist_ok=True)
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    if STORE_FILE.exists():
+        try:
+            data = json.loads(STORE_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {"version": 1, "clis": {}}
+    else:
+        data = {"version": 1, "clis": {}}
+    if not isinstance(data, dict):
+        data = {"version": 1, "clis": {}}
+    data.setdefault("clis", {})
+    for c in CLIS:
+        data["clis"].setdefault(c["id"], {"models": [], "current": None})
+        bucket = data["clis"][c["id"]]
+        if not isinstance(bucket.get("models"), list):
+            bucket["models"] = []
+    if not STORE_FILE.exists():
+        save_store(data)
+    return data
+
+
+def save_store(data: dict[str, Any]) -> None:
+    APP_HOME.mkdir(parents=True, exist_ok=True)
+    tmp = STORE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, STORE_FILE)
+    try:
+        os.chmod(STORE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def bucket_of(store: dict[str, Any], cli_id: str) -> dict[str, Any]:
+    return store["clis"].setdefault(cli_id, {"models": [], "current": None})
+
+
+# ---------------------------------------------------------------------------
+# 应用到各 CLI
+# ---------------------------------------------------------------------------
+
+def backup_file(path: Path) -> None:
+    if not path.exists():
+        return
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    shutil.copy2(path, BACKUPS_DIR / f"{path.name}.{ts}.bak")
+    backups = sorted(BACKUPS_DIR.glob(f"{path.name}.*.bak"), reverse=True)
+    for old in backups[20:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def normalize_openai_base(url: str) -> str:
+    """
+    规范化 OpenAI 兼容 baseURL。
+
+    注意：Qoder 云端代理往往会自己拼 `/v1/chat/completions`。
+    若这里再写死 `.../v1`，可能变成 `.../v1/v1/chat/completions` 导致 provider_error。
+    因此对常见根域名只保留 host 根路径；用户若已带 /v1 则去掉末尾 /v1。
+    """
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return ""
+    if u.endswith("/models"):
+        u = u[: -len("/models")].rstrip("/")
+    # 去掉末尾 /v1，交给 Qoder 侧拼接
+    if u.endswith("/v1"):
+        u = u[: -len("/v1")]
+    return u
+
+
+def looks_like_reasoning_model(model_id: str) -> bool:
+    m = (model_id or "").lower()
+    return any(
+        x in m
+        for x in (
+            "reasoner",
+            "reasoning",
+            "thinking",
+            "v4-pro",
+            "v4-flash",
+            "-r1",
+            "o1",
+            "o3",
+            "o4",
+        )
+    )
+
+
+def to_qoder_custom_item(model: dict[str, Any]) -> dict[str, Any]:
+    """
+    转成 Qoder settings 里的 customModels 项。
+
+    重要：Qoder CLI 对非 custom 的 provider 会丢掉 baseURL，改走云端白名单池。
+    自备 Key 直连厂商时必须用 provider=custom + baseURL，否则会报
+    custom model config not found。
+    """
+    raw_provider = str(model.get("provider") or "custom").strip() or "custom"
+    mid = str(model.get("model") or "model").strip()
+    api_key = str(model.get("apiKey") or "").strip()
+    display = str(model.get("name") or mid)
+    fmt = str(
+        model.get("format")
+        or ("anthropic" if raw_provider == "anthropic" else "openai")
+    ).strip()
+
+    base = str(model.get("baseURL") or "").strip()
+    if not base:
+        base = DEFAULT_BASE_URLS.get(raw_provider, "")
+
+    # 有明确 API 地址 → 走 custom 直连（自备 Key）
+    # anthropic 兼容中转同样需要 url
+    if base or raw_provider in ("custom", "openai", "anthropic"):
+        if fmt == "openai" and base:
+            base = normalize_openai_base(base)
+        # anthropic 一般不带 /v1
+        write_provider = "custom"
+        # key 必须与 provider 一致，避免沿用 deepseek/xxx 导致云端池查找
+        key = f"custom/{mid}"
+        item: dict[str, Any] = {
+            "provider": write_provider,
+            "model": mid,
+            "apiKey": api_key,
+            "key": key,
+            "displayName": display,
+            "format": fmt,
+        }
+        if base:
+            item["baseURL"] = base
+        # DeepSeek v4 / reasoner 等是推理模型，需标记否则上游响应可能被判错
+        if model.get("isReasoning") is True or looks_like_reasoning_model(mid):
+            item["isReasoning"] = True
+        if model.get("isVl") is True:
+            item["isVl"] = True
+        return item
+
+    # 无 baseURL：保留命名 provider，走 Qoder 官方 BYOK 池（Coding Plan 等）
+    key = str(model.get("key") or f"{raw_provider}/{mid}")
+    return {
+        "provider": raw_provider,
+        "model": mid,
+        "apiKey": api_key,
+        "key": key,
+        "displayName": display,
+        "format": fmt,
+    }
+
+
+def apply_qoder(model: dict[str, Any]) -> str:
+    backup_file(QODER_SETTINGS)
+    qs: dict[str, Any] = {}
+    if QODER_SETTINGS.exists():
+        try:
+            raw = json.loads(QODER_SETTINGS.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                qs = raw
+        except json.JSONDecodeError:
+            pass
+
+    api_key = str(model.get("apiKey") or "").strip()
+    if not api_key:
+        return "失败：没有 API Key"
+
+    item = to_qoder_custom_item(model)
+    key = str(item["key"])
+    display = str(item.get("displayName") or key)
+
+    mc = qs.get("modelConfigs") if isinstance(qs.get("modelConfigs"), dict) else {}
+    customs = list(mc.get("customModels") or []) if isinstance(mc.get("customModels"), list) else []
+    # 去掉同 key，以及旧的 provider/model 同名项
+    mid = str(item.get("model") or "")
+    merged = [item]
+    for c in customs:
+        if not isinstance(c, dict):
+            continue
+        ck = c.get("key") or f"{c.get('provider')}/{c.get('model')}"
+        if ck == key:
+            continue
+        # 清理明显坏掉的配置
+        if c.get("model") == mid and c.get("provider") in (item.get("provider"), model.get("provider")):
+            continue
+        merged.append(c)
+    mc["customModels"] = merged
+    qs["modelConfigs"] = mc
+
+    mcfg = dict(qs["model"]) if isinstance(qs.get("model"), dict) else {}
+    mcfg["name"] = key
+    qs["model"] = mcfg
+
+    QODER_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    QODER_SETTINGS.write_text(json.dumps(qs, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    QODER_MODEL_DEFAULT.parent.mkdir(parents=True, exist_ok=True)
+    cache: dict[str, Any] = {"key": key, "scene": "assistant", "updatedAt": int(time.time() * 1000)}
+    if QODER_MODEL_DEFAULT.exists():
+        try:
+            old = json.loads(QODER_MODEL_DEFAULT.read_text(encoding="utf-8"))
+            if isinstance(old, dict) and old.get("uid"):
+                cache["uid"] = old["uid"]
+        except json.JSONDecodeError:
+            pass
+    QODER_MODEL_DEFAULT.write_text(json.dumps(cache, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    mode = "直连 API" if item.get("provider") == "custom" else "Qoder BYOK 池"
+    base = item.get("baseURL") or ""
+    return f"已启用 → Qoder CLI：{display}  [{mode}{(' · ' + base) if base else ''}]"
+
+
+def apply_claude(model: dict[str, Any]) -> str:
+    path = Path.home() / ".claude" / "settings.json"
+    backup_file(path)
+    data: dict[str, Any] = {}
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+        except json.JSONDecodeError:
+            pass
+    env = dict(data["env"]) if isinstance(data.get("env"), dict) else {}
+    key = str(model.get("apiKey") or "")
+    if key:
+        env["ANTHROPIC_AUTH_TOKEN"] = key
+        env["ANTHROPIC_API_KEY"] = key
+    if model.get("baseURL"):
+        env["ANTHROPIC_BASE_URL"] = str(model["baseURL"])
+    mid = str(model.get("model") or "")
+    if mid:
+        env["ANTHROPIC_MODEL"] = mid
+        for k in (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ):
+            env[k] = mid
+    data["env"] = env
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return f"已启用 → Claude Code：{model.get('name')}"
+
+
+def apply_codex(model: dict[str, Any]) -> str:
+    APP_HOME.mkdir(parents=True, exist_ok=True)
+    sidecar = APP_HOME / "codex-active.json"
+    sidecar.write_text(json.dumps(model, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    env_file = APP_HOME / "codex.env"
+    lines = [f"export OPENAI_API_KEY={json.dumps(model.get('apiKey') or '')}"]
+    if model.get("baseURL"):
+        lines.append(f"export OPENAI_BASE_URL={json.dumps(model['baseURL'])}")
+    if model.get("model"):
+        lines.append(f"export OPENAI_MODEL={json.dumps(model['model'])}")
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f"已启用 → Codex：{model.get('name')}（env: {env_file}）"
+
+
+def apply_model(cli_id: str, model: dict[str, Any]) -> str:
+    if cli_id == "qoder":
+        return apply_qoder(model)
+    if cli_id == "claude":
+        return apply_claude(model)
+    if cli_id == "codex":
+        return apply_codex(model)
+    return "未知 CLI"
+
+
+def mask_key(k: str) -> str:
+    if not k:
+        return "未配置"
+    if len(k) <= 8:
+        return "****"
+    return k[:3] + "****" + k[-4:]
+
+
+# ---------------------------------------------------------------------------
+# 拉取模型列表
+# ---------------------------------------------------------------------------
+
+def _models_urls(provider: str, base_url: str) -> list[str]:
+    """候选 /models 地址。"""
+    base = (base_url or DEFAULT_BASE_URLS.get(provider) or "").rstrip("/")
+    if not base:
+        return []
+    urls: list[str] = []
+    if base.endswith("/models"):
+        urls.append(base)
+    else:
+        urls.append(f"{base}/models")
+        if not base.endswith("/v1"):
+            urls.append(f"{base}/v1/models")
+    # 去重保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def fetch_remote_models(provider: str, api_key: str, base_url: str = "") -> tuple[list[str], str]:
+    """
+    尝试从厂商 OpenAI 兼容接口拉模型列表。
+    返回 (ids, 来源说明)。失败则 ([], 错误信息)。
+    """
+    key = (api_key or "").strip()
+    if not key:
+        return [], "无 API Key"
+
+    headers_variants: list[dict[str, str]] = [
+        {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "x-api-key": key,
+        },
+    ]
+    # 智谱部分接口用 Authorization
+    if provider == "anthropic":
+        headers_variants.insert(
+            0,
+            {
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+        )
+
+    last_err = "无法获取"
+    for url in _models_urls(provider, base_url):
+        for headers in headers_variants:
+            try:
+                req = urllib.request.Request(url, headers=headers, method="GET")
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+                ids: list[str] = []
+                if isinstance(data, dict):
+                    items = data.get("data") or data.get("models") or []
+                    if isinstance(items, list):
+                        for it in items:
+                            if isinstance(it, str):
+                                ids.append(it)
+                            elif isinstance(it, dict):
+                                mid = it.get("id") or it.get("name") or it.get("model")
+                                if mid:
+                                    ids.append(str(mid))
+                elif isinstance(data, list):
+                    for it in data:
+                        if isinstance(it, str):
+                            ids.append(it)
+                        elif isinstance(it, dict) and it.get("id"):
+                            ids.append(str(it["id"]))
+                # 去重
+                uniq: list[str] = []
+                seen: set[str] = set()
+                for m in ids:
+                    if m not in seen:
+                        seen.add(m)
+                        uniq.append(m)
+                if uniq:
+                    return uniq, f"接口: {url}"
+                last_err = f"{url} 返回空列表"
+            except urllib.error.HTTPError as e:
+                last_err = f"{url} HTTP {e.code}"
+            except urllib.error.URLError as e:
+                last_err = f"{url} 网络错误: {e.reason}"
+            except Exception as e:  # noqa: BLE001
+                last_err = f"{url} {type(e).__name__}: {e}"
+    return [], last_err
+
+
+def list_models_for_provider(
+    provider: str,
+    api_key: str,
+    base_url: str = "",
+    prefer_current: str = "",
+) -> tuple[list[str], str]:
+    """优先远程拉取，失败用内置 fallback。"""
+    remote, src = fetch_remote_models(provider, api_key, base_url)
+    if remote:
+        models = list(remote)
+        note = f"已获取 {len(models)} 个模型（{src}）"
+    else:
+        models = list(FALLBACK_MODELS.get(provider) or [])
+        note = f"远程失败（{src}），使用内置列表"
+        if not models:
+            note = f"远程失败（{src}），无内置列表，请手动输入"
+
+    if prefer_current and prefer_current not in models:
+        models.insert(0, prefer_current)
+    return models, note
+
+
+# ---------------------------------------------------------------------------
+# 绘制（简单左对齐）
+# ---------------------------------------------------------------------------
+
+def draw_cli_select(idx: int) -> None:
+    clear()
+    put(f"{B}你想要修改什么 CLI？{R}")
+    put(f"{D}← → 切换   Enter 确认   q 退出{R}")
+    put()
+    parts: list[str] = []
+    for i, c in enumerate(CLIS):
+        if i == idx:
+            parts.append(f"{REV} {c['label']} {R}")
+        else:
+            parts.append(f" {c['label']} ")
+    put("  " + "  ".join(parts))
+    put()
+    put(f"  当前: {CLIS[idx]['label']}")
+
+
+def draw_model_list(
+    cli_label: str,
+    models: list[dict[str, Any]],
+    current_id: str | None,
+    cursor: int,
+    status: str = "",
+) -> None:
+    clear()
+    put(f"{B}{cli_label}{R}  自定义模型")
+    put(f"{D}↑↓ 移动   Enter 选用/新增   e 编辑   d 删除   Esc 返回{R}")
+    put()
+
+    total = len(models) + 1
+    if not models:
+        put(f"{D}  (暂无模型，选最下面「+ 新增模型」){R}")
+        put()
+
+    for i in range(total):
+        on = i == cursor
+        if i < len(models):
+            m = models[i]
+            using = m.get("id") == current_id
+            flag = "* " if using else "  "
+            name = pad(str(m.get("name") or "未命名"), 14)
+            model_s = pad(f"{m.get('provider', '')}/{m.get('model', '')}", 28)
+            key_s = mask_key(str(m.get("apiKey") or ""))
+            text = f"{flag}{name}  {model_s}  {key_s}"
+            if on:
+                put(f"  {REV}> {text}{R}")
+            else:
+                put(f"    {text}")
+        else:
+            if on:
+                put(f"  {REV}> + 新增模型{R}")
+            else:
+                put(f"    {YELLOW}+ 新增模型{R}")
+
+    put()
+    if status:
+        put(f"{GREEN}{status}{R}")
+
+
+def draw_vendor_select(idx: int) -> None:
+    clear()
+    put(f"{B}新增模型 — 选择厂商{R}")
+    put(f"{D}← → / ↑↓ 切换   Enter 下一步   Esc 取消{R}")
+    put()
+    for i, v in enumerate(VENDOR_PRESETS):
+        if i == idx:
+            put(f"  {REV}> {v['label']}{R}  {D}{v['provider']}/{v['model']}{R}")
+        else:
+            put(f"    {v['label']}")
+
+
+def draw_pick_list(
+    title: str,
+    items: list[str],
+    cursor: int,
+    hint: str = "",
+    status: str = "",
+) -> None:
+    clear()
+    put(f"{B}{title}{R}")
+    put(f"{D}↑↓ 选择   Enter 确认   m 手动输入   r 重新拉取   Esc 取消{R}")
+    if hint:
+        put(f"{D}{hint}{R}")
+    put()
+    if not items:
+        put(f"{YELLOW}  (列表为空，按 m 手动输入){R}")
+    else:
+        # 窗口滚动，避免列表太长
+        win = 12
+        start = max(0, min(cursor - win // 2, max(0, len(items) - win)))
+        end = min(len(items), start + win)
+        if start > 0:
+            put(f"{D}  … 上面还有 {start} 项{R}")
+        for i in range(start, end):
+            label = items[i]
+            if i == cursor:
+                put(f"  {REV}> {label}{R}")
+            else:
+                put(f"    {label}")
+        if end < len(items):
+            put(f"{D}  … 下面还有 {len(items) - end} 项{R}")
+    put()
+    if status:
+        put(f"{D}{status}{R}")
+
+
+# ---------------------------------------------------------------------------
+# 输入 / 选择
+# ---------------------------------------------------------------------------
+
+def prompt_text(term: Term, label: str, default: str = "") -> str | None:
+    term.cooked()
+    show_cursor()
+    try:
+        put()
+        if default:
+            put_raw(f"{label} [{default}]: ")
+        else:
+            put_raw(f"{label}: ")
+        try:
+            line = sys.stdin.readline()
+        except KeyboardInterrupt:
+            return None
+        if line == "":
+            return None
+        line = line.rstrip("\r\n")
+        return line if line else (default or "")
+    finally:
+        hide_cursor()
+        term.raw()
+
+
+def pick_model_id(
+    term: Term,
+    provider: str,
+    api_key: str,
+    base_url: str = "",
+    current: str = "",
+    title: str = "选择模型",
+) -> str | None:
+    """自动拉模型列表供选择；可手动输入。"""
+    clear()
+    put(f"{B}正在获取模型列表…{R}")
+    put(f"{D}provider={provider}{R}")
+    models, note = list_models_for_provider(provider, api_key, base_url, prefer_current=current)
+
+    cursor = 0
+    if current and current in models:
+        cursor = models.index(current)
+    status = note
+
+    while True:
+        draw_pick_list(title, models, cursor, hint=f"当前: {current or '-'}", status=status)
+        k = term.read_key()
+        if k in ("esc", "q", "ctrl-c"):
+            return None
+        if k == "up":
+            if models:
+                cursor = (cursor - 1) % len(models)
+        elif k == "down":
+            if models:
+                cursor = (cursor + 1) % len(models)
+        elif k == "r":
+            clear()
+            put(f"{B}重新拉取…{R}")
+            models, note = list_models_for_provider(
+                provider, api_key, base_url, prefer_current=current
+            )
+            cursor = 0
+            if current and current in models:
+                cursor = models.index(current)
+            status = note
+        elif k == "m":
+            manual = prompt_text(term, "模型 ID", current or "")
+            if manual is None:
+                continue
+            manual = manual.strip()
+            if manual:
+                return manual
+        elif k == "enter":
+            if models:
+                return models[cursor]
+            # 空列表走手动
+            manual = prompt_text(term, "模型 ID", current or "")
+            if manual is None:
+                return None
+            manual = manual.strip()
+            return manual or None
+
+
+def flow_add_model(term: Term) -> dict[str, Any] | None:
+    idx = 0
+    while True:
+        draw_vendor_select(idx)
+        k = term.read_key()
+        if k in ("esc", "q", "ctrl-c"):
+            return None
+        if k in ("left", "up"):
+            idx = (idx - 1) % len(VENDOR_PRESETS)
+        elif k in ("right", "down"):
+            idx = (idx + 1) % len(VENDOR_PRESETS)
+        elif k == "enter":
+            break
+
+    preset = VENDOR_PRESETS[idx]
+    provider = str(preset["provider"])
+    default_base = str(preset.get("baseURL") or "")
+
+    clear()
+    put(f"{B}新增模型 — {preset['label']}{R}")
+    put(f"{D}直接回车用默认值，Ctrl+C 取消{R}")
+
+    name = prompt_text(term, "显示名称", str(preset["label"]))
+    if name is None:
+        return None
+    api_key = prompt_text(term, "API Key", "")
+    if api_key is None or not str(api_key).strip():
+        clear()
+        put(f"{YELLOW}API Key 不能为空，已取消{R}")
+        time.sleep(1.0)
+        return None
+    api_key = str(api_key).strip()
+
+    base_url = default_base
+    if provider in ("openai", "anthropic", "custom") or not default_base:
+        bu = prompt_text(term, "Base URL（可空）", default_base)
+        if bu is None:
+            return None
+        base_url = bu.strip()
+
+    mid = pick_model_id(
+        term,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        current=str(preset.get("model") or ""),
+        title=f"选择模型 — {preset['label']}",
+    )
+    if mid is None:
+        return None
+
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "name": name.strip() or str(preset["label"]),
+        "provider": provider,
+        "model": mid.strip(),
+        "apiKey": api_key,
+        "baseURL": base_url,
+        "format": "anthropic" if provider == "anthropic" else "openai",
+        "key": f"{provider}/{mid.strip()}",
+    }
+
+
+def flow_edit_model(term: Term, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """编辑显示名称 / API Key / 模型（可自动拉列表）。"""
+    clear()
+    put(f"{B}编辑模型{R}")
+    put(f"{D}{entry.get('name')}  ({entry.get('provider')}/{entry.get('model')}){R}")
+    put(f"{D}直接回车保留原值，Ctrl+C 取消{R}")
+
+    name = prompt_text(term, "显示名称", str(entry.get("name") or ""))
+    if name is None:
+        return None
+
+    old_key = str(entry.get("apiKey") or "")
+    api_in = prompt_text(
+        term,
+        f"API Key（回车保留 {mask_key(old_key)}）",
+        "",
+    )
+    if api_in is None:
+        return None
+    api_key = api_in.strip() if api_in.strip() else old_key
+    if not api_key:
+        clear()
+        put(f"{YELLOW}API Key 不能为空{R}")
+        time.sleep(1.0)
+        return None
+
+    base_url = str(entry.get("baseURL") or DEFAULT_BASE_URLS.get(str(entry.get("provider") or ""), ""))
+    provider = str(entry.get("provider") or "custom")
+    if provider in ("openai", "anthropic", "custom"):
+        bu = prompt_text(term, "Base URL", base_url)
+        if bu is None:
+            return None
+        base_url = bu.strip()
+
+    mid = pick_model_id(
+        term,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        current=str(entry.get("model") or ""),
+        title=f"选择模型 — {name or entry.get('name')}",
+    )
+    if mid is None:
+        return None
+
+    updated = dict(entry)
+    updated["name"] = name.strip() or str(entry.get("name") or "未命名")
+    updated["apiKey"] = api_key
+    updated["model"] = mid.strip()
+    updated["baseURL"] = base_url
+    updated["key"] = f"{provider}/{mid.strip()}"
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# 主交互
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    if not sys.stdin.isatty():
+        print("请在交互式终端运行: qoder-switch", file=sys.stderr)
+        return 1
+
+    store = ensure_store()
+    hide_cursor()
+    try:
+        with Term() as term:
+            while True:
+                # -------- 屏1：选 CLI（左右）--------
+                cli_idx = 0
+                while True:
+                    draw_cli_select(cli_idx)
+                    k = term.read_key()
+                    if k in ("q", "esc", "ctrl-c"):
+                        clear()
+                        return 0
+                    if k == "left":
+                        cli_idx = (cli_idx - 1) % len(CLIS)
+                    elif k == "right":
+                        cli_idx = (cli_idx + 1) % len(CLIS)
+                    elif k == "enter":
+                        break
+
+                cli = CLIS[cli_idx]
+                cli_id = cli["id"]
+                bucket = bucket_of(store, cli_id)
+                models: list[dict[str, Any]] = list(bucket.get("models") or [])
+                current_id: str | None = bucket.get("current")
+                cursor = 0
+                if current_id:
+                    for i, m in enumerate(models):
+                        if m.get("id") == current_id:
+                            cursor = i
+                            break
+                status = ""
+
+                # -------- 屏2：模型列表 --------
+                while True:
+                    draw_model_list(cli["label"], models, current_id, cursor, status)
+                    status = ""
+                    k = term.read_key()
+                    n_items = len(models) + 1
+
+                    if k in ("esc", "q"):
+                        break  # 回 CLI 选择
+                    if k == "ctrl-c":
+                        clear()
+                        return 0
+                    if k == "up":
+                        cursor = (cursor - 1) % n_items
+                    elif k == "down":
+                        cursor = (cursor + 1) % n_items
+                    elif k == "d":
+                        if cursor < len(models):
+                            target = models[cursor]
+                            if target.get("id") == current_id:
+                                status = "不能删除正在使用的模型，请先切换到其他项"
+                            else:
+                                models = [m for m in models if m.get("id") != target.get("id")]
+                                bucket["models"] = models
+                                store["clis"][cli_id] = bucket
+                                save_store(store)
+                                cursor = min(cursor, len(models))
+                                status = f"已删除：{target.get('name')}"
+                        else:
+                            status = "「新增模型」不可删除"
+                    elif k == "e":
+                        if cursor >= len(models):
+                            status = "请先选中已有模型再编辑"
+                            continue
+                        target = models[cursor]
+                        updated = flow_edit_model(term, target)
+                        if not updated:
+                            status = "已取消编辑"
+                            continue
+                        # 写回列表
+                        for i, m in enumerate(models):
+                            if m.get("id") == target.get("id"):
+                                models[i] = updated
+                                break
+                        bucket["models"] = models
+                        store["clis"][cli_id] = bucket
+                        save_store(store)
+                        status = f"已保存：{updated.get('name')}"
+                        # 若是当前使用中的模型，自动重新 apply
+                        if updated.get("id") == current_id:
+                            msg = apply_model(cli_id, updated)
+                            status = f"{status}  ·  {msg}  ·  请重启 CLI"
+                    elif k == "enter":
+                        if cursor >= len(models):
+                            # 新增
+                            entry = flow_add_model(term)
+                            if entry:
+                                models.append(entry)
+                                bucket["models"] = models
+                                store["clis"][cli_id] = bucket
+                                save_store(store)
+                                cursor = len(models) - 1
+                                status = f"已添加：{entry['name']}  ·  再按 Enter 设为使用"
+                        else:
+                            chosen = models[cursor]
+                            if not str(chosen.get("apiKey") or "").strip():
+                                status = "该模型没有 API Key"
+                                continue
+                            msg = apply_model(cli_id, chosen)
+                            bucket["current"] = chosen.get("id")
+                            current_id = str(chosen.get("id"))
+                            store["clis"][cli_id] = bucket
+                            save_store(store)
+                            status = msg + "  ·  请重启该 CLI 后生效"
+    finally:
+        show_cursor()
+        clear()
+        put("已退出")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
