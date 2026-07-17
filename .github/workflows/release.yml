@@ -39,10 +39,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Project rust-toolchain.toml pins channel 1.97.0 — use it, then ensure
+      # Apple targets exist (toml alone / action targets can miss on some runners).
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.0"
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Ensure Apple targets installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target list --installed
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -61,7 +72,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-mac-v3
+          shared-key: release-mac-v4
           cache-on-failure: true
 
       - name: Build macOS arm64 + x64
@@ -71,12 +82,12 @@ jobs:
           export PROTOC="${PROTOC:?}"
           mkdir -p dist
 
-          echo "==> arm64 (native)"
+          echo "==> arm64 (native on macos-14)"
           cargo build -p xai-yis-pager-bin --release --target aarch64-apple-darwin
           strip target/aarch64-apple-darwin/release/yis || true
           cp target/aarch64-apple-darwin/release/yis dist/yis-darwin-arm64
 
-          echo "==> x64 (cross from Apple Silicon runner)"
+          echo "==> x64 (cross-compile; requires rustup target)"
           cargo build -p xai-yis-pager-bin --release --target x86_64-apple-darwin
           strip target/x86_64-apple-darwin/release/yis || true
           cp target/x86_64-apple-darwin/release/yis dist/yis-darwin-x64
@@ -97,10 +108,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.0"
           targets: x86_64-pc-windows-msvc
+
+      - name: Ensure Windows target installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add x86_64-pc-windows-msvc
+          rustup target list --installed
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -126,7 +145,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-win-v3
+          shared-key: release-win-v4
           cache-on-failure: true
 
       - name: Build Windows x64
