@@ -1,148 +1,175 @@
-<div align="center">
+# Yis Cli (`yis`)
 
-<h1>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.x.ai/v1/website/spacexai-symbol-white-transparent-0c31957f.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png">
-    <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
-  </picture>
-  <br>
-  Yis Cli (<code>yis</code>)
-</h1>
+终端 AI 编程助手 · **本地安全模式** · 自备模型 API（BYOK）
 
-**Yis Cli** is SpaceXAI's terminal-based AI coding agent. It runs as a
-full-screen TUI that understands your codebase, edits files, executes shell
-commands, searches the web, and manages long-running tasks — interactively,
-headlessly for scripting/CI, or embedded in editors via the Agent Client
-Protocol (ACP).
+基于上游开源 CLI 二次发行。**不登录 grok.com / xAI**，不向 xAI 云上传对话与遥测；推理只请求你配置的厂商（DeepSeek、百炼、智谱等）或本机模型。
 
-[Installing the released binary](#installing-the-released-binary) ·
-[Building from source](#building-from-source) ·
-[Documentation](#documentation) ·
-[Repository layout](#repository-layout) ·
-[Development](#development) ·
-[Contributing](#contributing) ·
-[License](#license)
-
-![Yis Cli](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
-
-**Learn more about Yis Cli at [x.ai/cli](https://x.ai/cli)**
-
-This repository contains the Rust source for the `yis` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
-
-</div>
+仓库：https://github.com/481617494/yis-Cli
 
 ---
 
-## Installing the released binary
+## 功能概览
 
-**Yis Cli（本仓库二次发行）** 预编译包发布在
-[GitHub Releases](https://github.com/481617494/yis-Cli/releases)
-（macOS + Windows）：
+| 能力 | 说明 |
+|------|------|
+| **终端 TUI** | 全屏对话、读改代码、执行命令、管理会话 |
+| **本地安全** | Release 强制本地模式：无 xAI 登录、无遥测、无会话云同步 |
+| **多厂商模型** | DeepSeek / 阿里云百炼 / 智谱 / Kimi / MiniMax / 小米 MIMO / OpenAI·Anthropic 兼容 / 自定义 |
+| **模型配置** | CLI `yis models setup` + TUI `/model-add`（类 qoder-switch） |
+| **斜杠命令** | `/model` `/new` `/compact` `/language` 等 |
+| **无界面模式** | `yis -p "问题"` 适合脚本 |
+| **中英界面** | 默认中文，`/language` 切换 |
+| **安装包** | macOS + Windows，GitHub Actions 发版 |
 
-```sh
-# macOS
+### 不做的事（相对 xAI 云）
+
+- 浏览器 OAuth / `yis login` 连 auth.x.ai  
+- 远程 settings、官方模型目录拉取  
+- Mixpanel / Sentry / 会话 trace 上报  
+- 自动检查 x.ai 更新  
+
+### 仍会出网的数据
+
+| 数据 | 去向 |
+|------|------|
+| 对话 / 代码上下文 | **你配置的模型厂商** `base_url` |
+| `web_fetch` / 联网工具 / MCP | 对应目标（用到时） |
+
+完全离线：模型指向本机（如 Ollama `http://127.0.0.1:11434/v1`）。
+
+---
+
+## 安装
+
+### macOS
+
+```bash
 curl -fsSL https://github.com/481617494/yis-Cli/releases/latest/download/install.sh | bash
 
-# Windows PowerShell
+# 如提示找不到命令：
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+### Windows（PowerShell）
+
+```powershell
 irm https://github.com/481617494/yis-Cli/releases/latest/download/install.ps1 | iex
+```
 
+预编译包：https://github.com/481617494/yis-Cli/releases  
+
+（需 Releases 页有 Assets；仅有 Tags 时请等 Actions 的 `release` 任务成功。）
+
+---
+
+## 快速开始
+
+```bash
+# 1. 配置模型（必做）
 yis models setup
-yis --version
+# 或一条命令：
+# yis models add --preset deepseek --api-key sk-你的密钥
+
+# 2. 进入项目并启动
+cd /path/to/your/project
+yis
+
+# 3. 输入需求，回车发送
 ```
 
-推送 tag（如 `v0.1.0`）后，GitHub Actions 会自动构建并上传资产。详见 [YIS_CLI.md](YIS_CLI.md)。
+### 常用 CLI
 
-> 上游 xAI 官方安装（连云端登录，与本本地版不同）：
-> `curl -fsSL https://x.ai/cli/install.sh | bash`
+| 命令 | 作用 |
+|------|------|
+| `yis` | 启动 TUI |
+| `yis -m <模型id>` | 指定模型启动 |
+| `yis -p "问题"` | 无界面单次提问 |
+| `yis models` | 列出已配置模型 |
+| `yis models setup` | 交互配置厂商 + API Key |
+| `yis models presets` | 内置厂商列表 |
+| `yis models add --preset deepseek --api-key sk-...` | 非交互添加 |
+| `yis --version` / `yis --help` | 版本 / 帮助 |
 
-## 本地开发与运维
+### TUI 内常用
 
-完整命令清单（编译、模型配置、发版、清理 `target/`）：  
-→ **[docs/本地开发与运维.md](docs/本地开发与运维.md)**
+| 操作 | 说明 |
+|------|------|
+| 输入后 Enter | 发送 |
+| `/model` 或 `Ctrl+M` | 切换模型 |
+| `/model-add` | 管理厂商 / Key |
+| `/new` | 新会话 |
+| `/compact` | 压缩上下文 |
+| `/language` | 中英切换 |
+| `/help` | 帮助 |
+| `/quit` | 退出 |
 
-## Building from source
+配置文件：`~/.yis/config.toml`（勿把含 Key 的配置提交到公开仓库）
 
-Requirements:
+---
 
-- **Rust** — the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml);
-  `rustup` installs it automatically on first build.
-- **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) (a
-  [dotslash](https://dotslash-cli.com) launcher) or falls back to a `protoc` on
-  `PATH` / `$PROTOC`.
-- macOS and Linux are supported build hosts; Windows builds are best-effort
-  and not currently tested from this tree.
+## 文档
 
-```sh
-cargo run -p xai-yis-pager-bin              # build + launch the TUI
-cargo build -p xai-yis-pager-bin --release  # release binary: target/release/xai-yis-pager
-cargo check -p xai-yis-pager-bin            # fast validation
+| 文档 | 内容 |
+|------|------|
+| **[docs/使用手册.md](docs/使用手册.md)** | 安装、配置、对话、快捷键、FAQ |
+| **[docs/本地开发与运维.md](docs/本地开发与运维.md)** | 编译、改代码、发版、清理 `target/` |
+| **[YIS_CLI.md](YIS_CLI.md)** | 本地安全模式与隐私边界 |
+| [user-guide/](crates/codegen/xai-yis-pager/docs/user-guide/) | 更细的上游能力文档（部分仍带上游表述） |
+
+---
+
+## 从源码构建
+
+依赖：
+
+- **Rust**（见 `rust-toolchain.toml`，`rustup` 会自动安装）  
+- **protoc**（`PATH` 上的 `protoc`，或设置 `PROTOC`；仓库 `bin/protoc` 需 [dotslash](https://dotslash-cli.com)）
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cd /path/to/yis-Cli
+
+cargo run -p xai-yis-pager-bin                 # 开发运行
+cargo build -p xai-yis-pager-bin --release     # 产物: target/release/yis
+cargo check -p xai-yis-pager-bin               # 快速检查
+
+# 磁盘占用大时可清理编译缓存（不影响 ~/.yis 配置）
+cargo clean
 ```
 
-The binary artifact is named `yis` (package `xai-yis-pager-bin`). **Yis 发行版默认本地安全模式**：不打开浏览器登录 grok.com。首次使用请配置模型：
+---
 
-```sh
-yis models setup                          # 交互：选厂商 + API Key
-yis models add --preset deepseek --api-key sk-...
+## 发版（维护者）
+
+```bash
+git push yis main
+git tag v0.1.x
+git push yis v0.1.x
 ```
 
-TUI 内也可用 `/model-add`。详见 [YIS_CLI.md](YIS_CLI.md) 与
-[authentication guide](crates/codegen/xai-yis-pager/docs/user-guide/02-authentication.md)。
+GitHub Actions（`.github/workflows/release.yml`）构建：
 
-## Documentation
+- `yis-darwin-arm64` / `yis-darwin-x64`  
+- `yis-windows-x64.exe`  
+- `install.sh` / `install.ps1`  
 
-Full online documentation is available at
-[docs.x.ai/build/overview](https://docs.x.ai/build/overview).
+---
 
-The user guide ships with the pager crate:
-[`crates/codegen/xai-yis-pager/docs/user-guide/`](crates/codegen/xai-yis-pager/docs/user-guide/)
-— getting started, keyboard shortcuts, slash commands, configuration, theming,
-MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
+## 仓库结构（简）
 
-## Repository layout
+| 路径 | 内容 |
+|------|------|
+| `crates/codegen/xai-yis-pager-bin` | 主二进制 `yis` |
+| `crates/codegen/xai-yis-pager` | TUI |
+| `crates/codegen/xai-yis-shell` | Agent 运行时、模型配置、本地模式闸 |
+| `crates/codegen/xai-yis-env` | `is_local_mode()` 真源 |
+| `crates/codegen/xai-yis-tools` | 工具实现 |
+| `scripts/` | 安装脚本、本机打 release |
+| `docs/` | 中文使用与运维文档 |
+| `qoder-switch/` | 模型切换交互参考 |
 
-| Path | Contents |
-|------|----------|
-| `crates/codegen/xai-yis-pager-bin` | Composition-root package; builds the `xai-yis-pager` binary |
-| `crates/codegen/xai-yis-pager` | The TUI: scrollback, prompt, modals, rendering |
-| `crates/codegen/xai-yis-shell` | Agent runtime + leader/stdio/headless entry points |
-| `crates/codegen/xai-yis-tools` | Tool implementations (terminal, file edit, search, ...) |
-| `crates/codegen/xai-yis-workspace` | Host filesystem, VCS, execution, checkpoints |
-| `crates/codegen/...` | The rest of the CLI crate closure (config, MCP, markdown, sandbox, ...) |
-| `crates/common/`, `crates/build/`, `prod/mc/` | Small shared leaf crates pulled in by the closure |
-| `third_party/` | Vendored upstream source (Mermaid diagram stack) — see below |
+---
 
-> [!IMPORTANT]
-> The root `Cargo.toml` (workspace members, dependency versions, lints,
-> profiles) is **generated** — treat it as read-only. Prefer editing per-crate
-> `Cargo.toml` files.
+## 许可
 
-## Development
-
-```sh
-cargo check -p <crate>        # always target specific crates; full-workspace builds are slow
-cargo test -p xai-yis-config # per-crate tests
-cargo clippy -p <crate>       # lint config: clippy.toml at the repo root
-cargo fmt --all               # rustfmt.toml at the repo root
-```
-
-## Contributing
-
-> [!NOTE]
-> External contributions are not accepted. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-## License
-
-First-party code in this repository is licensed under the **Apache License,
-Version 2.0** — see [`LICENSE`](LICENSE).
-
-Third-party and vendored code remains under its original licenses. See:
-
-- [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES) — crates.io / git dependencies,
-  bundled UI themes, and **in-tree source ports** (including openai/codex and
-  sst/opencode tool implementations)
-- [`crates/codegen/xai-yis-tools/THIRD_PARTY_NOTICES.md`](crates/codegen/xai-yis-tools/THIRD_PARTY_NOTICES.md)
-  — crate-local notice for the codex and opencode ports (license texts +
-  Apache §4(b) change notice)
-- [`third_party/NOTICE`](third_party/NOTICE) — vendored Mermaid-stack index
+见 [LICENSE](LICENSE)。本仓库为二次发行，上游组件遵循其各自许可。

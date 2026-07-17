@@ -248,6 +248,10 @@ pub struct EndpointsConfig {
     pub gcs_service_account_key: Option<String>,
 }
 pub(crate) fn default_asset_server_url() -> String {
+    // Privacy: never default to assets.grok.com in local mode.
+    if crate::util::config::is_local_mode() {
+        return std::env::var("YIS_ASSET_SERVER_URL").unwrap_or_default();
+    }
     std::env::var("YIS_ASSET_SERVER_URL").unwrap_or_else(|_| ASSET_SERVER_URL_DEFAULT.to_owned())
 }
 /// A blank or whitespace-only override counts as unset. Single source of truth

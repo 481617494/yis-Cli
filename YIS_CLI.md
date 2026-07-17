@@ -2,6 +2,7 @@
 
 本仓库基于上游 CLI 二次发行，产品名为 **Yis Cli**。
 
+> **怎么用（安装、配置、对话、FAQ）**：见 [docs/使用手册.md](docs/使用手册.md)  
 > **本地开发 / 编译 / 发版 / 清理 target**：见 [docs/本地开发与运维.md](docs/本地开发与运维.md)
 
 ## 本地安全模式（发行默认）
@@ -25,6 +26,39 @@ Debug 构建仍可用 `YIS_LOCAL_MODE=0` 临时恢复上游云路径（开发用
 | `YIS_LOCAL_MODE=0` | 仅 Debug 可关本地模式 |
 | `YIS_OFFLINE=1` | 强制本地 |
 | `YIS_LANG=zh` / `en` | 界面语言（默认 zh） |
+
+## 隐私边界（务必读）
+
+### 不会做的（xAI / grok 云）
+
+正式 **Release** 安装包下，默认：
+
+- 不登录 / 不刷新 `auth.x.ai` 会话  
+- 不请求 `cli-chat-proxy.grok.com` 的 settings/models  
+- 不上报 Mixpanel / Sentry / OTLP / 会话 trace  
+- 不同步会话到 code.grok.com  
+- 不自动检查 `x.ai/cli` 更新  
+- 不默认拉 `assets.grok.com` 资源  
+
+源码里仍可能保留上游云 URL **字符串**（便于 Debug 测云），但 Release 运行时 local 硬闸会挡住。
+
+### 仍会离开本机的数据
+
+| 数据 | 去向 |
+|------|------|
+| 你的对话 / 代码片段（推理） | **你配置的模型厂商**（DeepSeek、百炼等） |
+| Agent 执行 `web_fetch` / 联网搜索 | 目标网站或搜索后端 |
+| 你配置的 MCP / 手动装插件 | 对应服务器或 Git 仓库 |
+| Shell 工具里的 `curl`/`git` | 模型让执行时出网 |
+
+**「不上传 xAI」≠「数据绝对不出本机」。**  
+若要完全离线：模型 `base_url` 用本机（如 Ollama `http://127.0.0.1:11434/v1`），且不要用联网工具/MCP。
+
+### 数据落在本机的
+
+- `~/.yis/config.toml`（API Key、模型）  
+- `~/.yis/` 下会话与缓存  
+- 崩溃日志本地文件（不上报） |
 
 ## 配置模型（qoder-switch 风格）
 
